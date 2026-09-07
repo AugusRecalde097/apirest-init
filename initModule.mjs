@@ -1,110 +1,131 @@
-import process from 'process'
-import fs from 'fs'
+// scripts/createMicroservice.js
+import fs from "fs";
+import process from "process";
 
-let name = process.argv[2]
-name = name.toLowerCase()
+let name = process.argv[2];
 
-let errorFile = true
+if (!name) throw new Error("Debe especificar un nombre para el módulo nuevo.");
+name = name.toLowerCase();
 
-const routeFile = `import express from 'express'
-import { getController } from '../controllers/${name}.controller.js'
+if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+  throw new Error(
+    "Nombre inválido. Solo letras, números, guiones y guiones bajos permitidos.",
+  );
+}
 
-// requiero el ruteador
-const router = express.Router()
+const basePath = `./src/${name}`;
 
-// Endpoints
-router.get('/ping', (req, res) => {
-  res.status(200).send('Conexión exitosa')
-})
-router.get('/', getController)
+const getRouteFile = (n) => `import express from 'express';
+import { getController } from '../controllers/${n}.controller.js';
 
-export default router
-`
+const router = express.Router();
 
-const controllerFile = `import { getData } from '../services/${name}.service.js'
+router.get('/ping', (req, res) => res.status(200).send('Conexión exitosa'));
+router.get('/', getController);
+
+export default router;
+`;
+
+const getControllerFile = (
+  n,
+) => `import { getData } from '../services/${n}.service.js';
 
 export const getController = async (req, res) => {
-  const { id } = req.body
+  const { id } = req.body;
+  const request = await getData(id);
 
-  const request = await getData(id)
-  if (request?.error) { return res.status(401).json({ error: true, msg: request.msg }) }
-  return res.status(200).json({ error: false, msg: request.msg })
-}
-`
+  if (request?.error) {
+    return res.status(401).json({ error: true, msg: request.msg });
+  }
+  return res.status(200).json({ error: false, msg: request.msg });
+};
+`;
 
-const serviceFile = `import { getConnection, sql } from '../../db/connection.js'
-const pool = await getConnection()
+const getServiceFile =
+  () => `import { getConnection, sql } from '../../db/connection.js';
+const pool = await getConnection();
 
 export const getData = async (id) => {
-  const query = 'SELECT * FROM TABLE_NAME WHERE TABLA_CODIGO = @TABLA_CODIGO'
+  const query = 'SELECT * FROM TABLE_NAME WHERE TABLA_CODIGO = @TABLA_CODIGO';
 
   try {
     const recordset = await pool
       .request()
       .input('TABLA_CODIGO', sql.NVarChar, id)
-      .query(query)
-    const result = recordset.recordset
-    return result
-  } catch (e) {
-    return { status: '500', datos: {}, message: e.message }
-  }
-}
-`
-const middlewareFile = `export const validation = async (req, res, next) => {
-  const error = true
-  try {
-    if (error) return res.status(401).send('Error: ')
-    next()
-  } catch (error) {
-    return res.status(401).send('Error: ' + error.message)
-  }
-}
-`
+      .query(query);
 
-/**
- *  Función para crear archivos con su respectivo contenido
- * @param {String} file Archivo con su ruta relativa
- * @param {String} content Contenido que contendra el archivo
- */
+    return recordset.recordset;
+  } catch (e) {
+    return { status: '500', datos: {}, message: e.message };
+  }
+};
+`;
+
+const getMiddlewareFile =
+  () => `export const validation = async (req, res, next) => {
+  try {
+    // Validación personalizada
+    return next();
+  } catch (error) {
+    return res.status(401).send('Error: ' + error.message);
+  }
+};
+`;
+
 const createFile = (file, content) => {
-  fs.appendFile(
-    file,
-    content,
-    function (err) {
-      if (err) throw err
-      errorFile = false
-    }
-  )
-}
+  fs.writeFileSync(file, content, "utf8");
+};
 
 try {
-  if (!name) throw new Error('Debe especificar un nombre para el módulo nuevo.')
-
-  if (!fs.existsSync(`./src/${name}`)) {
-    fs.mkdirSync(`./src/${name}`)
-
-    // Carpetas para el módulo.
-    fs.mkdirSync(`./src/${name}/controllers`)
-    fs.mkdirSync(`./src/${name}/routes`)
-    fs.mkdirSync(`./src/${name}/services`)
-    fs.mkdirSync(`./src/${name}/middlewares`)
-
-    // Archivos iniciales para el módulo.
-    createFile(`./src/${name}/services/${name}.service.js`, serviceFile)
-    createFile(`./src/${name}/controllers/${name}.controller.js`, controllerFile)
-    createFile(`./src/${name}/routes/${name}.routes.js`, routeFile)
-    createFile(`./src/${name}/middlewares/${name}.middleware.js`, middlewareFile)
-
-    const mensajeExito = `
-    ===============================
-    ¡Servicio creado correctamente!
-    ===============================
-    `
-
-    if (errorFile) console.log(mensajeExito)
-  } else {
-    throw new Error('Ya existe módulo con ese nombre.')
+  if (fs.existsSync(basePath)) {
+    throw new Error("Ya existe un módulo con ese nombre.");
   }
+
+  // Crear estructura de carpetas
+  fs.mkdirSync(basePath);
+  fs.mkdirSync(`${basePath}/controllers`);
+  fs.mkdirSync(`${basePath}/routes`);
+  fs.mkdirSync(`${basePath}/services`);
+  // fs.mkdirSync(`${basePath}/middlewares`);
+
+  // Crear archivos base
+  createFile(`${basePath}/routes/${name}.routes.js`, getRouteFile(name));
+  createFile(
+    `${basePath}/controllers/${name}.controller.js`,
+    getControllerFile(name),
+  );
+  createFile(`${basePath}/services/${name}.service.js`, getServiceFile());
+  // createFile(`${basePath}/middlewares/${name}.middleware.js`,getMiddlewareFile(),);
+
+  // Post-create: actualizar ApiGateway
+  const apiPath = "./src/apiGateway.js";
+  const routeName = name.toLowerCase();
+  const importLine = `import ${routeName} from "./${routeName}/routes/${routeName}.routes.js";\n`;
+  const useLine = `  router.use("/${routeName}", ${routeName});\n`;
+  console.log(`✅ Directorio para el módulo '${routeName}' fue creado.`);
+
+  let apiCode = fs.readFileSync(apiPath, "utf8");
+
+  if (!apiCode.includes(importLine)) {
+    const importMarker = "// Requerimiento de las rutas de la aplicacion.";
+    apiCode = apiCode.replace(importMarker, importMarker + "\n" + importLine);
+  }
+
+  if (!apiCode.includes(useLine)) {
+    const useMarker = "  // Rutas de cada servicio";
+    apiCode = apiCode.replace(useMarker, useMarker + "\n" + useLine);
+  }
+
+  fs.writeFileSync(apiPath, apiCode, "utf8");
+  console.log(`✅ apiGateway actualizado con la ruta '/${routeName}'`);
+
+  // console.log(
+  //   `\n===============================\n¡Servicio '${name}' creado correctamente!\n===============================`,
+  // );
+  console.log(`✅ Servicio '${name}' creado correctamente.`);
+  console.log(
+    `🌐 Prueba de conexión:\nhttp://localhost:3001/api/v1/${routeName}/ping`,
+  );
 } catch (err) {
-  console.error(err)
+  console.error("❌ Error al crear el microservicio:", err.message);
 }
